@@ -56,24 +56,30 @@ export class MyDurableObject extends DurableObject<Env> {
         }
     }
 
-    // Storage related
+    // Storage getters
 
-    async setName(value: string): Promise<void> {
-        await this.ctx.storage.put("name", value)
-        await this.broadcastHello()
+    async getGreeting(): Promise<string> {
+        return (await this.ctx.storage.get("greeting")) || "Hello"
     }
 
     async getName(): Promise<string> {
         return (await this.ctx.storage.get("name")) || "World"
     }
 
+    // Storage setters
+
     async setGreeting(value: string): Promise<void> {
-        await this.ctx.storage.put("greeting", value)
-        await this.broadcastHello()
+        if (value.trim().length) {
+            await this.ctx.storage.put("greeting", value.trim())
+            await this.broadcastHello()
+        }
     }
 
-    async getGreeting(): Promise<string> {
-        return (await this.ctx.storage.get("greeting")) || "Hello"
+    async setName(value: string): Promise<void> {
+        if (value.trim().length) {
+            await this.ctx.storage.put("name", value.trim())
+            await this.broadcastHello()
+        }
     }
 
     // Main hello
