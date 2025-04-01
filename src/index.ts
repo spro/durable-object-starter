@@ -1,66 +1,99 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject } from "cloudflare:workers"
+import { Hono } from "hono"
+import { cors } from "hono/cors"
 
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
-
-/** A Durable Object's behavior is defined in an exported Javascript class */
-export class MyDurableObject extends DurableObject<Env> {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param ctx - The interface for interacting with Durable Object state
-	 * @param env - The interface to reference bindings declared in wrangler.jsonc
-	 */
-	constructor(ctx: DurableObjectState, env: Env) {
-		super(ctx, env);
-	}
-
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @param name - The name provided to a Durable Object instance from a Worker
-	 * @returns The greeting to be sent back to the Worker
-	 */
-	async sayHello(name: string): Promise<string> {
-		return `Hello, ${name}!`;
-	}
+type Env = {
+    Bindings: {
+        MY_DURABLE_OBJECT: DurableObjectNamespace<MyDurableObject>
+    }
 }
 
-export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param request - The request submitted to the Worker from the client
-	 * @param env - The interface to reference bindings declared in wrangler.jsonc
-	 * @param ctx - The execution context of the Worker
-	 * @returns The response to be sent back to the client
-	 */
-	async fetch(request, env, ctx): Promise<Response> {
-		// Create a `DurableObjectId` for an instance of the `MyDurableObject`
-		// class named "foo". Requests from all Workers to the instance named
-		// "foo" will go to a single globally unique Durable Object instance.
-		const id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName("foo");
+export class MyDurableObject extends DurableObject<Env> {
+    constructor(ctx: DurableObjectState, env: Env) {
+        super(ctx, env)
+    }
 
-		// Create a stub to open a communication channel with the Durable
-		// Object instance.
-		const stub = env.MY_DURABLE_OBJECT.get(id);
+    async fetch(request: Request): Promise<Response> {
+        const websocketPair = new WebSocketPair()
+        const [client, server] = Object.values(websocketPair)
+        this.ctx.acceptWebSocket(server)
+        return new Response(null, { status: 101, webSocket: client })
+    }
 
-		// Call the `sayHello()` RPC method on the stub to invoke the method on
-		// the remote Durable Object instance
-		const greeting = await stub.sayHello("world");
+    async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
+        // Upon receiving a message from the client, the server replies with the same message,
+        // and the total number of connections with the "[Durable Object]: " prefix
+        // ws.send(`[Durable Object] message: ${message}, connections: ${this.ctx.getWebSockets().length}`)
+        ws.send(JSON.stringify({ hello: "world" }))
+    }
 
-		return new Response(greeting);
-	},
-} satisfies ExportedHandler<Env>;
+    async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
+        // If the client closes the connection, the runtime will invoke the webSocketClose() handler.
+        ws.close(code, "Durable Object is closing WebSocket")
+    }
+
+    async setGreeting(value: string): Promise<void> {
+        await this.ctx.storage.put("greeting", value)
+        for (const connection of this.ctx.getWebSockets()) {
+            connection.send(JSON.stringify({ greeting: value }))
+        }
+    }
+
+    async getGreeting(): Promise<string> {
+        return (await this.ctx.storage.get("greeting")) || "Hello"
+    }
+
+    async sayHello(name: string): Promise<string> {
+        const greeting = await this.getGreeting()
+        return `${greeting}, ${name}!`
+    }
+}
+
+const app = new Hono<Env>()
+
+app.get("/ws", async (c) => {
+    if (c.req.header("upgrade") !== "websocket") {
+        return c.text("Expected websocket request", 426)
+    }
+    const id = c.env.MY_DURABLE_OBJECT.idFromName("foo")
+    const stub = c.env.MY_DURABLE_OBJECT.get(id)
+    return stub.fetch(c.req.raw)
+})
+
+app.use(
+    "*",
+    cors({
+        origin: ["http://localhost:5173", "https://durable-object-frontend.pages.dev"],
+        allowHeaders: ["Origin", "Content-Type", "Authorization"],
+        allowMethods: ["GET", "OPTIONS", "POST", "PUT", "DELETE"],
+        credentials: true,
+    })
+)
+
+app.get("/", async (c) => {
+    const name = c.req.query("name") || "world"
+    const id: DurableObjectId = c.env.MY_DURABLE_OBJECT.idFromName("foo")
+    const stub = c.env.MY_DURABLE_OBJECT.get(id)
+    const greeting = await stub.sayHello(name)
+
+    return c.text(greeting)
+})
+
+app.get("/greeting", async (c) => {
+    const id: DurableObjectId = c.env.MY_DURABLE_OBJECT.idFromName("foo")
+    const stub = c.env.MY_DURABLE_OBJECT.get(id)
+    const greeting = await stub.getGreeting()
+
+    return c.text(greeting)
+})
+
+app.post("/greeting", async (c) => {
+    const id: DurableObjectId = c.env.MY_DURABLE_OBJECT.idFromName("foo")
+    const stub = c.env.MY_DURABLE_OBJECT.get(id)
+    const greeting = await c.req.text()
+    await stub.setGreeting(greeting)
+
+    return c.text(`Set greeting to "${greeting}"`)
+})
+
+export default app
