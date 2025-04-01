@@ -13,6 +13,8 @@ export class MyDurableObject extends DurableObject<Env> {
         super(ctx, env)
     }
 
+    // Websocket related
+
     async fetch(request: Request): Promise<Response> {
         const websocketPair = new WebSocketPair()
         const [client, server] = Object.values(websocketPair)
@@ -20,31 +22,65 @@ export class MyDurableObject extends DurableObject<Env> {
         return new Response(null, { status: 101, webSocket: client })
     }
 
+    async webSocketOpen(ws: WebSocket) {
+        ws.send(JSON.stringify({ welcome: "Welcome!" }))
+    }
+
     async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
-        // Upon receiving a message from the client, the server replies with the same message,
-        // and the total number of connections with the "[Durable Object]: " prefix
-        // ws.send(`[Durable Object] message: ${message}, connections: ${this.ctx.getWebSockets().length}`)
-        ws.send(JSON.stringify({ hello: "world" }))
+        console.log("got message", message, typeof message)
+        await this.broadcastUsers()
+        const hello = await this.sayHello()
+        ws.send(JSON.stringify({ hello }))
     }
 
     async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
         // If the client closes the connection, the runtime will invoke the webSocketClose() handler.
+        console.log("got a close event", code, reason, wasClean)
         ws.close(code, "Durable Object is closing WebSocket")
+        setTimeout(() => {
+            this.broadcastUsers()
+        }, 500)
+    }
+
+    async broadcastUsers(diff: number = 0) {
+        const n_connections = this.ctx.getWebSockets().length + diff
+        for (const connection of this.ctx.getWebSockets()) {
+            connection.send(JSON.stringify({ users: n_connections }))
+        }
+    }
+
+    async broadcastHello() {
+        const hello = await this.sayHello()
+        for (const connection of this.ctx.getWebSockets()) {
+            connection.send(JSON.stringify({ hello }))
+        }
+    }
+
+    // Storage related
+
+    async setName(value: string): Promise<void> {
+        await this.ctx.storage.put("name", value)
+        await this.broadcastHello()
+    }
+
+    async getName(): Promise<string> {
+        return (await this.ctx.storage.get("name")) || "World"
     }
 
     async setGreeting(value: string): Promise<void> {
         await this.ctx.storage.put("greeting", value)
-        for (const connection of this.ctx.getWebSockets()) {
-            connection.send(JSON.stringify({ greeting: value }))
-        }
+        await this.broadcastHello()
     }
 
     async getGreeting(): Promise<string> {
         return (await this.ctx.storage.get("greeting")) || "Hello"
     }
 
-    async sayHello(name: string): Promise<string> {
+    // Main hello
+
+    async sayHello(name?: string): Promise<string> {
         const greeting = await this.getGreeting()
+        if (!name) name = await this.getName()
         return `${greeting}, ${name}!`
     }
 }
@@ -71,7 +107,7 @@ app.use(
 )
 
 app.get("/", async (c) => {
-    const name = c.req.query("name") || "world"
+    const name = c.req.query("name")
     const id: DurableObjectId = c.env.MY_DURABLE_OBJECT.idFromName("foo")
     const stub = c.env.MY_DURABLE_OBJECT.get(id)
     const greeting = await stub.sayHello(name)
@@ -94,6 +130,15 @@ app.post("/greeting", async (c) => {
     await stub.setGreeting(greeting)
 
     return c.text(`Set greeting to "${greeting}"`)
+})
+
+app.post("/name", async (c) => {
+    const id: DurableObjectId = c.env.MY_DURABLE_OBJECT.idFromName("foo")
+    const stub = c.env.MY_DURABLE_OBJECT.get(id)
+    const name = await c.req.text()
+    await stub.setName(name)
+
+    return c.text(`Set name to "${name}"`)
 })
 
 export default app
